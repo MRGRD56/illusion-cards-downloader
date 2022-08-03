@@ -2,6 +2,7 @@ package com.mrgrd56.illusioncardsdownloader.util;
 
 import java.text.MessageFormat;
 
+@Deprecated
 public final class Message {
     private Message() {}
 
