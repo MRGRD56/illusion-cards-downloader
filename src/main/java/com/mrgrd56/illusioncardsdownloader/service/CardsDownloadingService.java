@@ -13,8 +13,13 @@ import org.springframework.web.client.RestTemplate;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 import java.util.regex.Pattern;
 
 @Service
@@ -27,13 +32,13 @@ public class CardsDownloadingService {
             .headers(HTTP_HEADERS)
             .build();
 
+    private static final int ITEMS_PER_PAGE = 20;
+
     private final ArchivationService archivationService;
 
     public CardsDownloadingService(ArchivationService archivationService) {
         this.archivationService = archivationService;
     }
-
-    private static final int ITEMS_PER_PAGE = 20;
 
     public byte[] downloadIllusionCards(String search, Integer pageLimit) {
         var files = downloadIllusionCardsFiles(search, pageLimit);
@@ -52,14 +57,40 @@ public class CardsDownloadingService {
         var pagesCount = firstPage.getPagesCount();
         var actualPagesCount = actualPageLimit == null ? pagesCount : Math.min(pagesCount, actualPageLimit);
 
-        var result = new ArrayList<NamedFile>();
+        var result = Collections.synchronizedList(new ArrayList<NamedFile>());
+
+        var threadPool = Executors.newFixedThreadPool(7);
+        var callables = new ArrayList<Callable<Void>>();
 
         for (var page = 0; page < actualPagesCount; page++) {
             var searchPage = page == FIRST_PAGE_ID
                     ? firstPage
                     : getSearchPage(search, page);
 
-            result.addAll(searchPage.getResults().stream().map(this::downloadIllusionCardByHtmlUrl).toList());
+            var pageCallables = searchPage.getResults().stream()
+                    .map(url -> {
+                        return (Callable<Void>) (() -> {
+                            var file = downloadIllusionCardByHtmlUrl(url);
+                            result.add(file);
+
+                            return null;
+                        });
+                    })
+                    .toList();
+
+            callables.addAll(pageCallables);
+        }
+
+        try {
+            threadPool.invokeAll(callables).forEach(future -> {
+                try {
+                    future.get();
+                } catch (InterruptedException | ExecutionException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
         }
 
         return result;
@@ -86,7 +117,7 @@ public class CardsDownloadingService {
             throw new RuntimeException(e);
         }
         var lastPageLink = document.selectFirst("#paginator > [alt='last page']");
-        Integer pagesCount = null;
+        Integer pagesCount = 1;
         if (lastPageLink != null) {
             var lastPageUrl = lastPageLink.attr("href");
             var pidMatcher = Pattern.compile("pid=(\\d+)").matcher(lastPageUrl);
